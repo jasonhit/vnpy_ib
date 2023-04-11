@@ -12,10 +12,13 @@ ES-2020006-C-2430-50-USD-FOP  GLOBEX
 
 from copy import copy
 from datetime import datetime, timedelta
+from decimal import Decimal
 from threading import Thread, Condition
 from typing import Optional, Dict, Any, List
 import shelve
 from tzlocal import get_localzone_name
+import pytz
+from queue import Empty, Queue
 
 from vnpy.event import EventEngine
 from ibapi.client import EClient
@@ -86,6 +89,7 @@ ORDERTYPE_IB2VT: Dict[str, OrderType] = {v: k for k, v in ORDERTYPE_VT2IB.items(
 EXCHANGE_VT2IB: Dict[Exchange, str] = {
     Exchange.SMART: "SMART",
     Exchange.NYMEX: "NYMEX",
+    Exchange.COMEX: "COMEX",
     Exchange.GLOBEX: "GLOBEX",
     Exchange.IDEALPRO: "IDEALPRO",
     Exchange.CME: "CME",
@@ -269,6 +273,8 @@ class IbApi(EWrapper):
         self.tick_exchange: Dict[int, Exchange] = {}
         self.subscribed: Dict[str, SubscribeRequest] = {}
         self.data_ready: bool = False
+        self.order_ready: bool = False
+        self.subscribeRequest_queue = Queue()
 
         self.history_req: HistoryRequest = None
         self.history_condition: Condition = Condition()
@@ -283,7 +289,18 @@ class IbApi(EWrapper):
 
         self.load_contract_data()
 
+        """  
+        Code:2104
+        TWS message：Market data farm connection is OK。 
+        Additional notes：notification that connection to the market data server is ok. This is a notification and not a true error condition, and is expected on first establishing connection.
+        
+        Important: The IBApi.EWrapper.nextValidID callback is commonly used to indicate that the connection is completed and other messages can be sent from the API client to TWS. 
+        There is the possibility that function calls made prior to this time could be dropped by TWS
+        """
         self.data_ready = False
+        self.order_ready = False
+
+        
 
     def connectionClosed(self) -> None:
         """连接断开回报"""
@@ -294,8 +311,26 @@ class IbApi(EWrapper):
         """下一个有效订单号回报"""
         super().nextValidId(orderId)
 
+        self.client.reqCurrentTime()
+        
         if not self.orderid:
             self.orderid = orderId
+        
+        if not self.order_ready:
+            self.order_ready = True
+        
+        if not self.data_ready:
+            self.data_ready = True
+
+        # 断线后重连，需要把订阅过的合约重新订阅
+        reqs: list = list(self.subscribed.values())
+        self.subscribed.clear()
+        for req in reqs:
+            self.subscribe(req)
+        
+        # 启动负责订阅行情的线程，只在初始化成功后启动，该线程断线后会退出(self.status = False)
+        self.subscribeRequest_thread = Thread(target=self.subscribeRunner)
+        self.subscribeRequest_thread.start()
 
     def currentTime(self, time: int) -> None:
         """IB当前服务器时间回报"""
@@ -307,7 +342,7 @@ class IbApi(EWrapper):
         msg: str = f"服务器时间: {time_string}"
         self.gateway.write_log(msg)
 
-    def error(self, reqId: TickerId, errorCode: int, errorString: str) -> None:
+    def error(self, reqId: TickerId, errorCode: int, errorString: str, advancedOrderRejectJson = "") -> None:
         """具体错误请求回报"""
         super().error(reqId, errorCode, errorString)
     
@@ -320,6 +355,32 @@ class IbApi(EWrapper):
         msg: str = f"信息通知，代码：{errorCode}，内容: {errorString}"
         self.gateway.write_log(msg)
 
+        '''
+        1100:Connectivity between IB and the TWS has been lost.Your TWS/IB Gateway has been disconnected from IB servers. This can occur because of an internet connectivity issue, a nightly reset of the IB servers, or a competing session.
+        1101:Connectivity between IB and TWS has been restored- data lost.*.The TWS/IB Gateway has successfully reconnected to IB's servers. Your market data requests have been lost and need to be re-submitted.
+        1102:Connectivity between IB and TWS has been restored- data maintained.The TWS/IB Gateway has successfully reconnected to IB's servers. Your market data requests have been recovered and there is no need for you to re-submit them.        
+        '''
+        # TWS与IB服务器已经断线
+        if errorCode == 1100:
+            self.order_ready = False
+            self.data_ready = False
+        
+        # TWS与IB服务器已经重连，需要重新订阅行情
+        if errorCode == 1102:
+            self.order_ready = True
+            self.data_ready = True
+
+            reqs: list = list(self.subscribed.values())
+            self.subscribed.clear()
+            for req in reqs:
+                self.subscribe(req)
+
+        # TWS与IB服务器已经重连，不需要做任何事情
+        if errorCode == 1102:
+            self.order_ready = True
+            self.data_ready = True
+
+        '''
         # 行情服务器已连接
         if errorCode == 2104 and not self.data_ready:
             self.data_ready = True
@@ -330,10 +391,14 @@ class IbApi(EWrapper):
             self.subscribed.clear()
             for req in reqs:
                 self.subscribe(req)
+        '''
 
     def tickPrice(
         self, reqId: TickerId, tickType: TickType, price: float, attrib: TickAttrib
     ) -> None:
+        if reqId not in self.ticks:
+            return
+        
         """tick价格更新回报"""
         super().tickPrice(reqId, tickType, price, attrib)
 
@@ -354,13 +419,24 @@ class IbApi(EWrapper):
         if exchange is Exchange.IDEALPRO or "CMDTY" in tick.symbol:
             if not tick.bid_price_1 or not tick.ask_price_1:
                 return
-            tick.last_price = (tick.bid_price_1 + tick.ask_price_1) / 2
-            tick.datetime = datetime.now(LOCAL_TZ)
-        self.gateway.on_tick(copy(tick))
+            # 处理计算出来的last price的数字位数，简单起见，最大5位数字，因为公式计算出来的last price位数太长
+
+
+        # datetime是quote update time，不是last trade time，所以每次行情变化，都修改这个time  
+        tick.datetime = datetime.now(LOCAL_TZ)
+        """
+        Market data tick price callback. Handles all price related ticks. Every tickPrice callback is followed by a tickSize. 
+        A tickPrice value of -1 or 0 followed by a tickSize of 0 indicates there is no data for this field currently available, whereas a tickPrice with a positive tickSize indicates an active quote of 0 (typically for a combo contract).
+        """
+        # IB API描述中，有tickPrice变化，一定会紧跟一个tickSize变化，所以，tickSize没更新之前，没必要提交on_tick，否则反而会给出错误的tickSize
+        # self.gateway.on_tick(copy(tick))
 
     def tickSize(
-        self, reqId: TickerId, tickType: TickType, size: int
+        self, reqId: TickerId, tickType: TickType, size: Decimal
     ) -> None:
+        if reqId not in self.ticks:
+            return
+        
         """tick数量更新回报"""
         super().tickSize(reqId, tickType, size)
 
@@ -371,11 +447,17 @@ class IbApi(EWrapper):
         name: str = TICKFIELD_IB2VT[tickType]
         setattr(tick, name, size)
 
+        # datetime是quote update time，不是last trade time，所以每次行情变化，都修改这个time  
+        tick.datetime = datetime.now(LOCAL_TZ)
+
         self.gateway.on_tick(copy(tick))
 
     def tickString(
         self, reqId: TickerId, tickType: TickType, value: str
     ) -> None:
+        # 因为这里这里只是更新 last trade time，已经没有必要了，我们把datetime改成quote update time了
+        return
+    
         """tick字符串更新回报"""
         super().tickString(reqId, tickType, value)
 
@@ -392,8 +474,8 @@ class IbApi(EWrapper):
         self,
         orderId: OrderId,
         status: str,
-        filled: float,
-        remaining: float,
+        filled: Decimal,
+        remaining: Decimal,
         avgFillPrice: float,
         permId: int,
         parentId: int,
@@ -486,7 +568,7 @@ class IbApi(EWrapper):
     def updatePortfolio(
         self,
         contract: Contract,
-        position: float,
+        position: Decimal,
         marketPrice: float,
         marketValue: float,
         averageCost: float,
@@ -578,8 +660,14 @@ class IbApi(EWrapper):
         """交易数据更新回报"""
         super().execDetails(reqId, contract, execution)
 
-        dt: datetime = datetime.strptime(execution.time, "%Y%m%d  %H:%M:%S")
-        dt: datetime = dt.replace(tzinfo=LOCAL_TZ)
+        strTimeList = execution.time.split(" ")
+        if len(strTimeList) > 2:
+            trade_tz = pytz.timezone(strTimeList[2])
+            dt: datetime = trade_tz.localize(datetime.strptime(strTimeList[0] + " " + strTimeList[1], "%Y%m%d %H:%M:%S"))
+            # dt: datetime = datetime.strptime(execution.time, "%Y%m%d %H:%M:%S %%")
+            # dt: datetime = dt.replace(tzinfo=LOCAL_TZ)
+        else:
+            dt: datetime = datetime.now(LOCAL_TZ)
 
         trade: TradeData = TradeData(
             symbol=generate_symbol(contract),
@@ -673,7 +761,12 @@ class IbApi(EWrapper):
 
         self.status = False
         self.client.disconnect()
+    
+    def subscribe(self, req: SubscribeRequest) -> None:
+        """把待请阅的合约放入队列，后面由专门负责订阅行情的线程来处理订阅"""
+        self.subscribeRequest_queue.put(req)
 
+    '''
     def subscribe(self, req: SubscribeRequest) -> None:
         """订阅tick数据更新"""
         if not self.status:
@@ -700,6 +793,7 @@ class IbApi(EWrapper):
 
         #  订阅tick数据并创建tick对象缓冲区
         self.reqid += 1
+        self.gateway.write_log(f"api订阅前reqid：{self.reqid},symbol:{req.symbol}")
         self.client.reqMktData(self.reqid, ib_contract, "", False, False, [])
 
         tick: TickData = TickData(
@@ -709,11 +803,65 @@ class IbApi(EWrapper):
             gateway_name=self.gateway_name,
         )
         self.ticks[self.reqid] = tick
+        self.gateway.write_log(f"api订阅后reqid：{self.reqid},symbol:{req.symbol}")
         self.tick_exchange[self.reqid] = req.exchange
+    '''
+
+    def subscribeRunner(self) -> None:
+        while self.status:
+            try:
+                # self.gateway.write_log(f"订阅行情队列{self.subscribeRequest_queue.qsize()}")
+                
+                if not self.status:
+                    continue
+
+                if not self.data_ready:
+                    continue
+
+                req: SubscribeRequest = self.subscribeRequest_queue.get(block=True, timeout=1)
+                if req.exchange not in EXCHANGE_VT2IB:
+                    self.gateway.write_log(f"订阅行情{req.symbol}失败，不支持的交易所{req.exchange}")
+                    continue
+
+                # 过滤重复订阅
+                if req.vt_symbol in self.subscribed:
+                    continue
+                self.subscribed[req.vt_symbol] = req
+
+                # 解析IB合约详情
+                ib_contract: Contract = generate_ib_contract(req.symbol, req.exchange)
+                if not ib_contract:
+                    self.gateway.write_log("订阅行情{req.symbol}失败。代码解析失败，请检查格式是否正确")
+                    continue
+
+                # 通过TWS查询合约信息
+                self.reqid += 1
+                self.client.reqContractDetails(self.reqid, ib_contract)
+
+                #  订阅tick数据并创建tick对象缓冲区
+                self.reqid += 1
+                self.gateway.write_log(f"api订阅前reqid：{self.reqid},symbol:{req.symbol}")
+                self.client.reqMktData(self.reqid, ib_contract, "", False, False, [])
+
+                tick: TickData = TickData(
+                    symbol=req.symbol,
+                    exchange=req.exchange,
+                    datetime=datetime.now(LOCAL_TZ),
+                    gateway_name=self.gateway_name,
+                )
+                self.ticks[self.reqid] = tick
+                self.gateway.write_log(f"api订阅后reqid：{self.reqid},symbol:{req.symbol}")
+                self.tick_exchange[self.reqid] = req.exchange
+
+            except Empty:
+                pass
 
     def send_order(self, req: OrderRequest) -> str:
         """委托下单"""
         if not self.status:
+            return ""
+        if not self.order_ready:
+            self.gateway.write_log(f"API还没有完全初始化完毕,还没有收到nextValidID,暂不能下单。symbol:{req.vt_symbol},direction:{req.direction},price:{req.price},volume:{req.volume}")
             return ""
 
         if req.exchange not in EXCHANGE_VT2IB:
@@ -738,9 +886,8 @@ class IbApi(EWrapper):
         ib_order.totalQuantity = req.volume
         ib_order.account = self.account
 
-        # 修复API版本升级导致的委托报错问题
-        ib_order.eTradeOnly = False
-        ib_order.firmQuoteOnly = False
+        # 非常规交易时间
+        ib_order.outsideRth = True
 
         if req.type == OrderType.LIMIT:
             ib_order.lmtPrice = req.price
@@ -751,6 +898,8 @@ class IbApi(EWrapper):
         self.client.reqIds(1)
 
         order: OrderData = req.create_order_data(str(self.orderid), self.gateway_name)
+        order.datetime = datetime.now(LOCAL_TZ)
+        
         self.gateway.on_order(order)
         return order.vt_orderid
 
@@ -758,14 +907,19 @@ class IbApi(EWrapper):
         """委托撤单"""
         if not self.status:
             return
+        if not self.order_ready:
+            self.gateway.write_log(f"API还没有完全初始化完毕,还没有收到nextValidID,暂不能撤单。oderid:{req.orderid},symbol:{req.vt_symbol},direction:{req.direction},price:{req.price},volume:{req.volume}")
+            return ""
 
-        self.client.cancelOrder(int(req.orderid))
+        # IB API 10.9.1在撤单时，新增1个参数，撤单时间
+        manualCancelOrderTime:str = datetime.now(LOCAL_TZ).strftime("%Y%m%d-%H:%M:%S")
+        self.client.cancelOrder(int(req.orderid), manualCancelOrderTime)
 
     def query_history(self, req: HistoryRequest) -> List[BarData]:
         """查询历史数据"""
         contract: ContractData = self.contracts[req.vt_symbol]
         if not contract:
-            self.write_log(f"找不到合约：{req.vt_symbol}，请先订阅")
+            self.gateway.write_log(f"找不到合约：{req.vt_symbol}，请先订阅")
             return []
 
         self.history_req = req

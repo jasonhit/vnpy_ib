@@ -13,7 +13,7 @@
 
 ## 说明
 
-基于ibapi的9.81.1.post1版本开发的InteractiveBrokers交易接口。
+基于ibapi的10.19.1版本开发的InteractiveBrokers交易接口。
 
 IbGateway中的合约代码命名规则和举例：
 
