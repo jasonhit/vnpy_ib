@@ -419,6 +419,7 @@ class IbApi(EWrapper):
         if exchange is Exchange.IDEALPRO or "CMDTY" in tick.symbol:
             if not tick.bid_price_1 or not tick.ask_price_1:
                 return
+            tick.last_price = round((tick.bid_price_1 + tick.ask_price_1) / 2,5)
             # 处理计算出来的last price的数字位数，简单起见，最大5位数字，因为公式计算出来的last price位数太长
 
 
