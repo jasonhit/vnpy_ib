@@ -93,6 +93,8 @@ EXCHANGE_VT2IB: Dict[Exchange, str] = {
     Exchange.GLOBEX: "GLOBEX",
     Exchange.IDEALPRO: "IDEALPRO",
     Exchange.CME: "CME",
+    Exchange.CBOT: "CBOT",
+    Exchange.CBOE: "CBOE",
     Exchange.ICE: "ICE",
     Exchange.SEHK: "SEHK",
     Exchange.SSE: "SEHKNTL",
@@ -287,6 +289,7 @@ class IbApi(EWrapper):
         self.status = True
         self.gateway.write_log("IB TWS连接成功")
 
+        # 由于加载合约信息后，会发送on_contract事件，该事件会促使类似datarecorder订阅行情，但现在刚连接上，并一定是马上订阅行情的好时机
         self.load_contract_data()
 
         """  
@@ -648,6 +651,19 @@ class IbApi(EWrapper):
             stop_supported=True,
             gateway_name=self.gateway_name,
         )
+
+        # 如果是OPT或者FOP期权，需要对期权的参数赋值
+        if ib_contract.secType in ["OPT", "FOP"]:
+            contract.option_strike = ib_contract.strike
+            #option_underlying: str = ""     # vt_symbol of underlying contract
+            if ib_contract.right == "C":
+                contract.option_type = OptionType.CALL
+            if ib_contract.right == "P":
+                contract.option_type = OptionType.PUT
+            #option_listed: datetime = None
+            contract.option_expiry = datetime.strptime(ib_contract.lastTradeDateOrContractMonth, "%Y%m%d")
+            #option_portfolio: str = ""
+            #option_index: str = ""          # for identifying options with same strike price
 
         if contract.vt_symbol not in self.contracts:
             self.gateway.on_contract(contract)
