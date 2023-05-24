@@ -19,6 +19,7 @@ import shelve
 from tzlocal import get_localzone_name
 import pytz
 from queue import Empty, Queue
+import pandas as pd
 
 from vnpy.event import EventEngine
 from ibapi.client import EClient
@@ -30,6 +31,10 @@ from ibapi.order_state import OrderState
 from ibapi.ticktype import TickType, TickTypeEnum
 from ibapi.wrapper import EWrapper
 from ibapi.common import BarData as IbBarData
+
+from ibapi.utils import intMaxString
+from ibapi.utils import floatMaxString
+from ibapi.utils import decimalMaxString
 
 from vnpy.trader.gateway import BaseGateway
 from vnpy.trader.object import (
@@ -55,7 +60,7 @@ from vnpy.trader.constant import (
     OptionType,
     Interval
 )
-from vnpy.trader.utility import get_file_path, ZoneInfo
+from vnpy.trader.utility import get_file_path, get_folder_path, ZoneInfo
 from vnpy.trader.event import EVENT_TIMER
 from vnpy.event import Event
 
@@ -212,6 +217,9 @@ class IbGateway(BaseGateway):
     def close(self) -> None:
         """关闭接口"""
         self.api.close()
+        
+        # 保存ib的合约信息文件夹，用户可读，但这个csv文件，不读回系统
+        self.api.save_ib_contracts_details_to_csv()
 
     def subscribe(self, req: SubscribeRequest) -> None:
         """订阅行情"""
@@ -271,6 +279,8 @@ class IbApi(EWrapper):
         self.orders: Dict[str, OrderData] = {}
         self.accounts: Dict[str, AccountData] = {}
         self.contracts: Dict[str, ContractData] = {}
+
+        self.ib_contracts_details: Dict[str, ContractDetails] = {} # ib的contract details
 
         self.tick_exchange: Dict[int, Exchange] = {}
         self.subscribed: Dict[str, SubscribeRequest] = {}
@@ -669,6 +679,7 @@ class IbApi(EWrapper):
             self.gateway.on_contract(contract)
 
             self.contracts[contract.vt_symbol] = contract
+            self.ib_contracts_details[contract.vt_symbol] = contractDetails
             self.save_contract_data()
 
     def execDetails(
@@ -990,6 +1001,7 @@ class IbApi(EWrapper):
         """加载本地合约数据"""
         f = shelve.open(self.data_filepath)
         self.contracts = f.get("contracts", {})
+        self.ib_contracts_details = f.get("ib_contracts_details", {})
         f.close()
 
         for contract in self.contracts.values():
@@ -1001,7 +1013,161 @@ class IbApi(EWrapper):
         """保存合约数据至本地"""
         f = shelve.open(self.data_filepath)
         f["contracts"] = self.contracts
+        f["ib_contracts_details"] = self.ib_contracts_details
         f.close()
+
+    def save_ib_contracts_details_to_csv(self) -> None:
+        """保存ib的合约信息文件夹,用户可读,但这个csv文件,不读回系统"""
+        folder_path = str(get_folder_path("contracts_info"))
+        contracts_info_filepath: str = folder_path + "\\ib_contracts_info.csv"
+        
+        header = [  'conId',
+                    'symbol',
+                    'secType',
+                    'lastTradeDateOrContractMonth',
+                    'strike',
+                    'right',
+                    'multiplier',
+                    'exchange',
+                    'primaryExchange',
+                    'currency',
+                    'localSymbol',
+                    'tradingClass',
+                    'includeExpired',
+                    'secIdType',
+                    'secId',
+                    'description',
+                    'issuerId',
+                    'comboLegsDescrip',
+                    'comboLegs',
+                    'deltaNeutralContract',
+                    'marketName',
+                    'minTick',
+                    'orderTypes',
+                    'validExchanges',
+                    'priceMagnifier',
+                    'underConId',
+                    'longName',
+                    'contractMonth',
+                    'industry',
+                    'category',
+                    'subcategory',
+                    'timeZoneId',
+                    'tradingHours',
+                    'liquidHours',
+                    'evRule',
+                    'evMultiplier',
+                    'aggGroup',
+                    'underSymbol',
+                    'underSecType',
+                    'marketRuleIds',
+                    'secIdList',
+                    'realExpirationDate',
+                    'lastTradeTime',
+                    'stockType',
+                    'minSize',
+                    'sizeIncrement',
+                    'suggestedSizeIncrement',
+                    'cusip',
+                    'ratings',
+                    'descAppend',
+                    'bondType',
+                    'couponType',
+                    'callable',
+                    'putable',
+                    'coupon',
+                    'convertible',
+                    'maturity',
+                    'issueDate',
+                    'nextOptionDate',
+                    'nextOptionType',
+                    'nextOptionPartial',
+                    'notes'
+                  ]
+        data_list = []
+        for key,value in self.ib_contracts_details.items():
+            data_list.append(self.get_ib_contracts_details_str(value))
+        
+        df = pd.DataFrame(columns=header, data=data_list)
+        df.to_csv(contracts_info_filepath, header=True, index=False)
+    
+    def get_ib_contracts_details_str(self, c:ContractDetails) -> List:
+        str_list = []
+        
+        str_list.append(str(c.contract.conId))
+        str_list.append(str(c.contract.symbol))
+        str_list.append(str(c.contract.secType))
+        str_list.append(str(c.contract.lastTradeDateOrContractMonth))
+        str_list.append(floatMaxString(c.contract.strike))
+        str_list.append(str(c.contract.right))
+        str_list.append(str(c.contract.multiplier))
+        str_list.append(str(c.contract.exchange))
+        str_list.append(str(c.contract.primaryExchange))
+        str_list.append(str(c.contract.currency))
+        str_list.append(str(c.contract.localSymbol))
+        str_list.append(str(c.contract.tradingClass))
+        str_list.append(str(c.contract.includeExpired))
+        str_list.append(str(c.contract.secIdType))
+        str_list.append(str(c.contract.secId))
+        str_list.append(str(c.contract.description))
+        str_list.append(str(c.contract.issuerId))
+        str_list.append("combo:" + c.contract.comboLegsDescrip)
+
+        comboLegs = ""
+        if c.contract.comboLegs:
+            for leg in c.contract.comboLegs:
+                comboLegs += ";" + str(leg)
+        str_list.append(comboLegs)
+    
+        deltaNeutralContract = ""
+        if c.contract.deltaNeutralContract:
+            deltaNeutralContract += ";" + str(c.contract.deltaNeutralContract)
+        str_list.append(deltaNeutralContract)
+
+        str_list.append(str(c.marketName))
+        str_list.append(floatMaxString(c.minTick))
+        str_list.append(str(c.orderTypes))
+        str_list.append(str(c.validExchanges))
+        str_list.append(intMaxString(c.priceMagnifier))
+        str_list.append(intMaxString(c.underConId))
+        str_list.append(str(c.longName))
+        str_list.append(str(c.contractMonth))
+        str_list.append(str(c.industry))
+        str_list.append(str(c.category))
+        str_list.append(str(c.subcategory))
+        str_list.append(str(c.timeZoneId))
+        str_list.append(str(c.tradingHours))
+        str_list.append(str(c.liquidHours))
+        str_list.append(str(c.evRule))
+        str_list.append(intMaxString(c.evMultiplier))
+        str_list.append(intMaxString(c.aggGroup))
+        str_list.append(str(c.underSymbol))
+        str_list.append(str(c.underSecType))
+        str_list.append(str(c.marketRuleIds))       
+        str_list.append(str(c.secIdList))
+        str_list.append(str(c.realExpirationDate))
+        str_list.append(str(c.lastTradeTime))
+        str_list.append(str(c.stockType))
+        str_list.append(decimalMaxString(c.minSize))
+        str_list.append(decimalMaxString(c.sizeIncrement))
+        str_list.append(decimalMaxString(c.suggestedSizeIncrement))
+        str_list.append(str(c.cusip))
+        str_list.append(str(c.ratings))
+        str_list.append(str(c.descAppend))
+        str_list.append(str(c.bondType))
+        str_list.append(str(c.couponType))
+        str_list.append(str(c.callable))
+        str_list.append(str(c.putable))
+        str_list.append(str(c.coupon))
+        str_list.append(str(c.convertible))
+        str_list.append(str(c.maturity))
+        str_list.append(str(c.issueDate))
+        str_list.append(str(c.nextOptionDate))
+        str_list.append(str(c.nextOptionType))
+        str_list.append(str(c.nextOptionPartial))
+        str_list.append(str(c.notes))     
+
+        return str_list
 
 
 def generate_ib_contract(symbol: str, exchange: Exchange) -> Optional[Contract]:
