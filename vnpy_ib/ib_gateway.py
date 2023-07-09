@@ -11,7 +11,7 @@ ES-2020006-C-2430-50-USD-FOP  GLOBEX
 
 
 from copy import copy
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from threading import Thread, Condition
 from typing import Optional, Dict, Any, List
@@ -518,7 +518,7 @@ class IbApi(EWrapper):
         if not order:
             return
 
-        order.traded = filled
+        order.traded = float(filled) # convert Decimal to float
 
         # 过滤撤单中止状态
         order_status: Status = STATUS_IB2VT.get(status, None)
@@ -624,7 +624,7 @@ class IbApi(EWrapper):
             symbol=generate_symbol(contract),
             exchange=exchange,
             direction=Direction.NET,
-            volume=position,
+            volume=float(position), # convert Decimal to float
             price=price,
             pnl=unrealizedPNL,
             gateway_name=self.gateway_name,
@@ -704,7 +704,7 @@ class IbApi(EWrapper):
             tradeid=str(execution.execId),
             direction=DIRECTION_IB2VT[execution.side],
             price=execution.price,
-            volume=execution.shares,
+            volume=float(execution.shares),
             datetime=dt,
             gateway_name=self.gateway_name,
         )
@@ -727,7 +727,7 @@ class IbApi(EWrapper):
         """历史数据更新回报"""
         # 日级别数据和周级别日期数据的数据形式为%Y%m%d
         if len(ib_bar.date) > 8:
-            dt: datetime = datetime.strptime(ib_bar.date, "%Y%m%d %H:%M:%S")
+            dt: datetime = generate_localtime(ib_bar.date) # 时间样式：20230629 10:30:00 Hongkong。datetime.strptime(ib_bar.date, "%Y%m%d %H:%M:%S")
         else:
             dt: datetime = datetime.strptime(ib_bar.date, "%Y%m%d")
         dt: datetime = dt.replace(tzinfo=LOCAL_TZ)
@@ -1216,3 +1216,15 @@ def generate_symbol(ib_contract: Contract) -> str:
     symbol: str = JOIN_SYMBOL.join(fields)
 
     return symbol
+
+def generate_localtime(str_datetime: str) -> datetime | None:
+    # 把"20230406 09:39:00 Hongkong" 变成 本地时区的 时间
+    strTimeList = str_datetime.split(" ")
+    if len(strTimeList) > 2:
+        bar_tz = pytz.timezone(strTimeList[2])
+        dt: datetime = bar_tz.localize(datetime.strptime(strTimeList[0] + " " + strTimeList[1], "%Y%m%d %H:%M:%S"))
+        
+        dt_local = dt.astimezone(pytz.timezone("Asia/Shanghai"))
+        return dt_local
+    else:
+        return None
