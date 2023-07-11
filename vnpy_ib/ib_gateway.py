@@ -662,6 +662,11 @@ class IbApi(EWrapper):
             gateway_name=self.gateway_name,
         )
 
+        # 龙胜自己额外增加 trading hours, time zone， local symbol
+        contract.trading_hours = contractDetails.tradingHours
+        contract.time_zone = contractDetails.timeZoneId
+        contract.ib_local_symbol = contractDetails.contract.localSymbol
+
         # 如果是OPT或者FOP期权，需要对期权的参数赋值
         if ib_contract.secType in ["OPT", "FOP"]:
             contract.option_strike = ib_contract.strike
