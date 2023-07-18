@@ -527,6 +527,8 @@ class IbApi(EWrapper):
 
         self.gateway.on_order(copy(order))
 
+        self.gateway.write_log(f"orderStatus:{order}")
+
     def openOrder(
         self,
         orderId: OrderId,
@@ -556,7 +558,8 @@ class IbApi(EWrapper):
             order.price = ib_order.auxPrice
 
         self.orders[orderid] = order
-        self.gateway.on_order(copy(order))
+        # 没必要发送此事件，因为每次OnOrderStatus都会前，都会发送一次OnOpenOrder，而且OnOpenOrder的order中，status一直都是submitting，回干扰策略的逻辑
+        #self.gateway.on_order(copy(order))
 
     def updateAccountValue(
         self, key: str, val: str, currency: str, accountName: str
