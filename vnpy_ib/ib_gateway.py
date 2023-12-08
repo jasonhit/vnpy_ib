@@ -89,6 +89,7 @@ ORDERTYPE_IB2VT: Dict[str, OrderType] = {v: k for k, v in ORDERTYPE_VT2IB.items(
 EXCHANGE_VT2IB: Dict[Exchange, str] = {
     Exchange.SMART: "SMART",
     Exchange.NYMEX: "NYMEX",
+    Exchange.COMEX: "COMEX",
     Exchange.GLOBEX: "GLOBEX",
     Exchange.IDEALPRO: "IDEALPRO",
     Exchange.CME: "CME",
@@ -994,8 +995,14 @@ class IbApi(EWrapper):
 
         symbol: str = JOIN_SYMBOL.join(fields)
 
+        # 由于self.contracts的key = {symbol}.{exchange.value}，所以需要对symbol进行处理
+        key = symbol
+        exchange: Exchange = EXCHANGE_IB2VT.get(ib_contract.exchange, None)
+        if exchange:
+            key = f"{key}.{exchange.value}"
+        
         # 在合约信息中找不到字符串风格代码，则使用数字代码
-        if symbol not in self.contracts:
+        if key not in self.contracts:
             symbol = str(ib_contract.conId)
 
         return symbol
