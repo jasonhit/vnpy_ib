@@ -998,6 +998,9 @@ class IbApi(EWrapper):
         # 由于self.contracts的key = {symbol}.{exchange.value}，所以需要对symbol进行处理
         key = symbol
         exchange: Exchange = EXCHANGE_IB2VT.get(ib_contract.exchange, None)
+        # 如果exchange不存在，那么看看primaryExchange是否存在
+        if not exchange:
+            exchange = EXCHANGE_IB2VT.get(ib_contract.primaryExchange, None)
         if exchange:
             key = f"{key}.{exchange.value}"
         
