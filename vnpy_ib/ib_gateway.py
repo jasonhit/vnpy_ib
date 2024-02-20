@@ -669,7 +669,7 @@ class IbApi(EWrapper):
         """交易数据更新回报"""
         super().execDetails(reqId, contract, execution)
 
-        if "/" in execution.time:
+        if len( execution.time.split(" ") ) > 2:     #if "/" in execution.time:
             timezone = execution.time.split(" ")[-1]
             time_str = execution.time.replace(f" {timezone}", "")
             tz = ZoneInfo(timezone)
