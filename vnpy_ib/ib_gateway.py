@@ -110,7 +110,13 @@ EXCHANGE_VT2IB: Dict[Exchange, str] = {
     Exchange.IEX: "IEX",
     Exchange.IBKRATS: "IBKRATS",
     Exchange.OTC: "PINK",
-    Exchange.SGX: "SGX"
+    Exchange.SGX: "SGX",
+    Exchange.OVERNIGHT: "OVERNIGHT",
+    Exchange.CBOE: "CBOE",
+    Exchange.CBOT: "CBOT",
+    Exchange.SBF: "SBF",
+    Exchange.EBS: "EBS",
+    Exchange.TSEJ: "TSEJ"
 }
 EXCHANGE_IB2VT: Dict[str, Exchange] = {v: k for k, v in EXCHANGE_VT2IB.items()}
 
@@ -886,6 +892,7 @@ class IbApi(EWrapper):
         ib_order.totalQuantity = Decimal(req.volume)
         ib_order.account = self.account
         ib_order.orderRef = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ib_order.outsideRth = True # 盘前盘后交易
 
         if req.type == OrderType.LIMIT:
             ib_order.lmtPrice = req.price
@@ -1005,8 +1012,8 @@ class IbApi(EWrapper):
             key = f"{key}.{exchange.value}"
         
         # 在合约信息中找不到字符串风格代码，则使用数字代码
-        if key not in self.contracts:
-            symbol = str(ib_contract.conId)
+        #if key not in self.contracts:
+        #    symbol = str(ib_contract.conId)
 
         return symbol
 
